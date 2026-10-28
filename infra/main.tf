@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -44,5 +48,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "uploads" {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
+  }
+
+resource "aws_s3_bucket" "uploads" {
+  bucket        = "exception-platform-uploads-${random_id.suffix.hex}"
+  force_destroy = true
   }
 }
