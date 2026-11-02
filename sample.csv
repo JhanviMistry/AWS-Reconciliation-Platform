@@ -1,0 +1,4 @@
+transaction_id,account_id,amount,currency,booked_at
+T001,A100,250.00,GBP,2026-10-01
+T002,A101,-40.50,GBP,2026-10-02
+T003,A100,1200.00,USD,2026-10-03

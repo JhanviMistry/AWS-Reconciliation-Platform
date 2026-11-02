@@ -9,3 +9,5 @@ crash.log
 .env
 *.pem
 .aws/
+
+processor.zip
