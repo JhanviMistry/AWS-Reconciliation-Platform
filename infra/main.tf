@@ -146,6 +146,11 @@ resource "aws_iam_role_policy" "processor" {
         Effect   = "Allow"
         Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
         Resource = aws_sqs_queue.uploads.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = [aws_dynamodb_table.transactions.arn, aws_dynamodb_table.exceptions.arn]
       }
     ]
   })
@@ -160,6 +165,13 @@ resource "aws_lambda_function" "processor" {
   source_code_hash = data.archive_file.processor.output_base64sha256
   timeout          = 30
   memory_size      = 256
+
+  environment {
+    variables = {
+      TRANSACTIONS_TABLE = aws_dynamodb_table.transactions.name
+      EXCEPTIONS_TABLE   = aws_dynamodb_table.exceptions.name
+    }
+  }
 
   depends_on = [aws_cloudwatch_log_group.processor]
 }
@@ -178,4 +190,32 @@ output "bucket_name" {
 
 output "dlq_url" {
   value = aws_sqs_queue.dlq.id
+}
+
+resource "aws_dynamodb_table" "transactions" {
+  name         = "exception-platform-transactions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "transaction_id"
+
+  attribute {
+    name = "transaction_id"
+    type = "S"
+  }
+}
+
+resource "aws_dynamodb_table" "exceptions" {
+  name         = "exception-platform-exceptions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "record_id"
+  range_key    = "rule"
+
+  attribute {
+    name = "record_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "rule"
+    type = "S"
+  }
 }

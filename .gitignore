@@ -11,3 +11,6 @@ crash.log
 .aws/
 
 processor.zip
+
+__pycache__/ 
+.pytest_cache/
