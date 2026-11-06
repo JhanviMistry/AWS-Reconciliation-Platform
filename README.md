@@ -159,21 +159,20 @@ Expected CSV columns: `transaction_id, account_id, amount, currency, booked_at`.
 
 ## Verified behaviour
 
-Each of these was run against a deployed stack:
+Run against a deployed stack:
 
-- A valid file is processed and rows are counted.
-- A file with the wrong headers fails, is retried by SQS, and lands in the dead-letter queue.
-- Rows with high values, bad amounts, unsupported currencies and future dates become exceptions while clean rows are stored.
-- Uploading the same data again under a new filename produces zero duplicates and zero extra exceptions.
-- A reused transaction ID with different content raises a conflict exception.
-- Unsigned API requests are rejected with `403`; a second review of the same exception returns `409`; the audit trail records the reviewer's IAM identity.
+- A valid file is processed and its rows are counted.
+- A file with the wrong headers fails and is retried by SQS (same message ID across attempts).
+- A file with high-value, malformed and invalid rows is processed: clean rows are stored and the rest are flagged.
+- Uploading identical data again under two new filenames produced zero new records on both runs, confirming idempotent processing.
 
-<!-- Add screenshots here once captured:
-![Processing logs](docs/screenshots/processing.png)
-![DLQ retries](docs/screenshots/dlq.png)
-![Idempotency](docs/screenshots/idempotency.png)
-![Review and audit](docs/screenshots/review.png)
--->
+## Implemented, test evidence pending
+
+- Dead-letter queue landing after the third failed attempt
+- Conflicting duplicate detection (same ID, different content)
+- Review API: IAM-authenticated access, approve/reject, double-review protection (`409`), audit trail
+
+
 
 ## Known limitations and next steps
 
