@@ -24,6 +24,11 @@ provider "aws" {
       Project = "exception-platform"
     }
   }
+
+  variable "alert_email" {
+  type        = string
+  description = "Email address for operational alerts"
+}
 }
 
 resource "random_id" "suffix" {
@@ -218,4 +223,206 @@ resource "aws_dynamodb_table" "exceptions" {
     name = "rule"
     type = "S"
   }
+}
+
+# ---------- Audit table ----------
+resource "aws_dynamodb_table" "audit" {
+  name         = "exception-platform-audit"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "exception_key"
+  range_key    = "event_at"
+
+  attribute {
+    name = "exception_key"
+    type = "S"
+  }
+
+  attribute {
+    name = "event_at"
+    type = "S"
+  }
+}
+
+# ---------- Reviewer Lambda ----------
+data "archive_file" "reviewer" {
+  type        = "zip"
+  source_dir  = "${path.module}/../src/reviewer"
+  output_path = "${path.module}/reviewer.zip"
+}
+
+resource "aws_cloudwatch_log_group" "reviewer" {
+  name              = "/aws/lambda/exception-platform-reviewer"
+  retention_in_days = 14
+}
+
+resource "aws_iam_role" "reviewer" {
+  name = "exception-platform-reviewer-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "reviewer" {
+  name = "reviewer-least-privilege"
+  role = aws_iam_role.reviewer.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.reviewer.arn}:*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:Scan", "dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.exceptions.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:Query"]
+        Resource = aws_dynamodb_table.audit.arn
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "reviewer" {
+  function_name    = "exception-platform-reviewer"
+  role             = aws_iam_role.reviewer.arn
+  runtime          = "python3.12"
+  handler          = "handler.lambda_handler"
+  filename         = data.archive_file.reviewer.output_path
+  source_code_hash = data.archive_file.reviewer.output_base64sha256
+  timeout          = 10
+  memory_size      = 256
+
+  environment {
+    variables = {
+      EXCEPTIONS_TABLE = aws_dynamodb_table.exceptions.name
+      AUDIT_TABLE      = aws_dynamodb_table.audit.name
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.reviewer]
+}
+
+# ---------- HTTP API with IAM auth ----------
+resource "aws_apigatewayv2_api" "reviewer" {
+  name          = "exception-platform-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "reviewer" {
+  api_id                 = aws_apigatewayv2_api.reviewer.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.reviewer.invoke_arn
+  payload_format_version = "2.0"
+}
+
+locals {
+  review_routes = ["GET /exceptions", "GET /audit", "POST /review"]
+}
+
+resource "aws_apigatewayv2_route" "reviewer" {
+  for_each           = toset(local.review_routes)
+  api_id             = aws_apigatewayv2_api.reviewer.id
+  route_key          = each.value
+  target             = "integrations/${aws_apigatewayv2_integration.reviewer.id}"
+  authorization_type = "AWS_IAM"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.reviewer.id
+  name        = "$default"
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_burst_limit = 10
+    throttling_rate_limit  = 5
+  }
+}
+
+resource "aws_lambda_permission" "apigw" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.reviewer.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.reviewer.execution_arn}/*/*"
+}
+
+output "api_url" {
+  value = aws_apigatewayv2_api.reviewer.api_endpoint
+}
+
+# ---------- Alerting ----------
+resource "aws_sns_topic" "alerts" {
+  name = "exception-platform-alerts"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+resource "aws_cloudwatch_metric_alarm" "dlq_not_empty" {
+  alarm_name          = "exception-platform-dlq-not-empty"
+  alarm_description   = "A file failed processing 3 times and is in the dead-letter queue"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = aws_sqs_queue.dlq.name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "queue_backlog" {
+  alarm_name          = "exception-platform-queue-backlog"
+  alarm_description   = "Oldest message in the upload queue has waited over 10 minutes"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  dimensions          = { QueueName = aws_sqs_queue.uploads.name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 5
+  threshold           = 600
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+locals {
+  monitored_lambdas = {
+    processor = aws_lambda_function.processor.function_name
+    reviewer  = aws_lambda_function.reviewer.function_name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
+  for_each            = local.monitored_lambdas
+  alarm_name          = "exception-platform-${each.key}-errors"
+  alarm_description   = "The ${each.key} Lambda crashed, timed out or failed to start"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  dimensions          = { FunctionName = each.value }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
 }
