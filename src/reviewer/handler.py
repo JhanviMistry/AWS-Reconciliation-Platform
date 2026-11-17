@@ -1,10 +1,15 @@
 import json
+import logging
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 dynamodb = boto3.client("dynamodb")
 deserializer = TypeDeserializer()
@@ -14,13 +19,21 @@ AUDIT_TABLE = os.environ["AUDIT_TABLE"]
 
 STATUSES = {"open", "approved", "rejected"}
 DECISIONS = {"approve": "approved", "reject": "rejected"}
+MAX_REASON = 1000
+
+
+def _json_default(o):
+    # DynamoDB numbers arrive as Decimal; turn them into normal JSON numbers
+    if isinstance(o, Decimal):
+        return int(o) if o == o.to_integral_value() else float(o)
+    raise TypeError(f"not serialisable: {type(o)}")
 
 
 def respond(status, body):
     return {
         "statusCode": status,
         "headers": {"content-type": "application/json"},
-        "body": json.dumps(body, default=str),
+        "body": json.dumps(body, default=_json_default),
     }
 
 
@@ -95,7 +108,6 @@ def review(record_id, rule, decision, reason, reviewer):
     )
     return new_status
 
-
 def lambda_handler(event, context):
     route = event["routeKey"]
     params = event.get("queryStringParameters") or {}
@@ -131,9 +143,18 @@ def lambda_handler(event, context):
                 return respond(400, {"error": f"decision must be one of {sorted(DECISIONS)}"})
             if not reason:
                 return respond(400, {"error": "reason is required"})
+            if len(reason) > MAX_REASON:
+                return respond(400, {"error": f"reason must be at most {MAX_REASON} characters"})
 
             reviewer = event["requestContext"]["authorizer"]["iam"]["userArn"]
             new_status = review(record_id, rule, decision, reason, reviewer)
+            logger.info(json.dumps({
+                "event": "exception_reviewed",
+                "record_id": record_id,
+                "rule": rule,
+                "decision": decision,
+                "reviewer": reviewer,
+            }))
             return respond(200, {"record_id": record_id, "rule": rule, "status": new_status})
 
         return respond(404, {"error": "not found"})
@@ -141,4 +162,5 @@ def lambda_handler(event, context):
     except ClientError as err:
         if err.response["Error"]["Code"] == "TransactionCanceledException":
             return respond(409, {"error": "exception not found or already reviewed"})
+        logger.exception(json.dumps({"event": "reviewer_error", "route": route}))
         raise
