@@ -10,7 +10,9 @@ crash.log
 *.pem
 .aws/
 
+*.zip
 processor.zip
+reviewer.zip
 
 __pycache__/ 
 .pytest_cache/

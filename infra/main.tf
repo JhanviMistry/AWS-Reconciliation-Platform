@@ -24,12 +24,13 @@ provider "aws" {
       Project = "exception-platform"
     }
   }
+}
 
-  variable "alert_email" {
+variable "alert_email" {
   type        = string
   description = "Email address for operational alerts"
 }
-}
+
 
 resource "random_id" "suffix" {
   byte_length = 4
@@ -425,4 +426,8 @@ resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+output "alerts_topic_arn" {
+  value = aws_sns_topic.alerts.arn
 }
